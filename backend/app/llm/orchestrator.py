@@ -4,7 +4,7 @@ import json
 from typing import Optional
 
 from app.config import settings
-from app.llm.prompts import INTENT_PARSE_PROMPT
+from app.llm.prompts import INTENT_PARSE_PROMPT, INTENT_CLASSIFY_PROMPT
 from app.llm.insights import generate_insight, generate_report
 from app.engine.simulation import simulation_engine
 from app.engine.counterfactual import counterfactual_engine
@@ -58,7 +58,23 @@ class Orchestrator:
         self.llm = LLMClient()
 
     async def process_natural_language_query(self, query: str) -> dict:
-        """Full pipeline: parse query -> simulate -> explain."""
+        """Full pipeline: classify -> parse query -> simulate -> explain."""
+
+        # Step 0: Classify intent — is this a business query or unrelated?
+        classify_prompt = INTENT_CLASSIFY_PROMPT.format(query=query)
+        classification = await self.llm.parse_json(classify_prompt)
+
+        if classification.get("category") == "unrelated":
+            answer = await self.llm.chat(
+                query,
+                system=(
+                    "You are a helpful AI assistant that specializes in business simulation and analytics. "
+                    "The user asked something unrelated to business data. Answer their question briefly and helpfully, "
+                    "then remind them that you specialize in business decision simulation — pricing, churn prediction, "
+                    "marketing analysis, and sentiment analysis. Suggest a relevant business question they could ask."
+                ),
+            )
+            return {"query": query, "insight": answer, "predictions": None, "category": "unrelated"}
 
         # Step 1: Parse user intent
         parse_prompt = INTENT_PARSE_PROMPT.format(query=query)

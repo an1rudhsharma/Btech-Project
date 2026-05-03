@@ -1,4 +1,4 @@
-"""Model training endpoints."""
+"""Model training endpoints with pre-training data validation."""
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
@@ -10,20 +10,21 @@ from app.engine.column_detector import detect_columns
 from app.engine.feature_builder import build_feature_matrix
 from app.engine.simulation import simulation_engine
 from app.engine.counterfactual import counterfactual_engine
+from app.engine.data_analyzer import analyze_dataframe, validate_for_training
 
 router = APIRouter()
 
 
 class TrainRequest(BaseModel):
     dataset_path: str
-    model_name: str  # "churn", "marketing", "pricing", "sentiment"
+    model_name: str
     target_column: Optional[str] = None
     column_mapping: Optional[dict] = None
 
 
 @router.post("/train")
 async def train_model(request: TrainRequest):
-    """Train a specific model on the given dataset."""
+    """Train a specific model on the given dataset with pre-training validation."""
     model_name = request.model_name
     if model_name not in simulation_engine.models:
         raise HTTPException(400, f"Unknown model: {model_name}. Valid: churn, marketing, pricing, sentiment")
@@ -37,9 +38,26 @@ async def train_model(request: TrainRequest):
     except Exception as e:
         raise HTTPException(400, f"Could not load dataset: {str(e)}")
 
-    detected = detect_columns(list(df.columns))
+    if len(df) == 0:
+        raise HTTPException(400, "Dataset is empty")
+
+    # Run data-first analysis to get column mapping
+    analysis = analyze_dataframe(df)
+    detected = analysis["column_mapping"]
+
+    # Allow user-provided mapping to override
     if request.column_mapping:
         detected.update(request.column_mapping)
+
+    # Pre-training validation: ensure required columns have >80% valid data
+    validation = validate_for_training(df, detected, model_name)
+    if not validation["valid"]:
+        raise HTTPException(400, {
+            "error": f"Cannot train '{model_name}' model — data validation failed",
+            "issues": validation["issues"],
+            "required_roles": validation["required_roles"],
+            "suggestion": "Upload a dataset with valid numeric data for the required columns, or provide a column_mapping override.",
+        })
 
     model = simulation_engine.models[model_name]
 
@@ -55,14 +73,23 @@ async def train_model(request: TrainRequest):
     elif model_name == "churn":
         target_col = request.target_column or detected.get("churn")
         if not target_col or target_col not in df.columns:
-            raise HTTPException(400, "No churn/target column found")
+            raise HTTPException(400, "No churn/target column found. Need a binary (0/1) column indicating customer churn.")
+
+        # Validate target column is binary
+        target_vals = pd.to_numeric(df[target_col], errors="coerce")
+        valid_pct = target_vals.notna().sum() / len(df)
+        if valid_pct < 0.8:
+            raise HTTPException(400, f"Target column '{target_col}' has only {valid_pct*100:.0f}% valid numeric values (need >80%)")
+
+        unique_vals = set(target_vals.dropna().unique())
+        if not unique_vals <= {0.0, 1.0}:
+            raise HTTPException(400, f"Churn target column must be binary (0/1). Found values: {sorted(list(unique_vals))[:10]}")
 
         feature_roles = [r for r in model.FEATURE_ROLES if detected.get(r)]
         X = build_feature_matrix(df, detected, feature_roles)
         y = df[target_col]
         metrics = model.train(X, y)
 
-        # Setup DiCE for counterfactuals
         try:
             train_df = X.copy()
             train_df["churn"] = y.values
@@ -76,7 +103,12 @@ async def train_model(request: TrainRequest):
     elif model_name == "marketing":
         target_col = request.target_column or detected.get("conversion_rate")
         if not target_col or target_col not in df.columns:
-            raise HTTPException(400, "No conversion_rate/target column found")
+            raise HTTPException(400, "No conversion_rate/target column found. Need a numeric column for conversion metric.")
+
+        target_vals = pd.to_numeric(df[target_col], errors="coerce")
+        valid_pct = target_vals.notna().sum() / len(df)
+        if valid_pct < 0.8:
+            raise HTTPException(400, f"Target column '{target_col}' has only {valid_pct*100:.0f}% valid numeric values (need >80%)")
 
         feature_roles = [r for r in model.FEATURE_ROLES if detected.get(r)]
         X = build_feature_matrix(df, detected, feature_roles)
@@ -96,7 +128,12 @@ async def train_model(request: TrainRequest):
     elif model_name == "pricing":
         target_col = request.target_column or detected.get("demand")
         if not target_col or target_col not in df.columns:
-            raise HTTPException(400, "No demand/target column found")
+            raise HTTPException(400, "No demand/target column found. Need a numeric column for demand/sales.")
+
+        target_vals = pd.to_numeric(df[target_col], errors="coerce")
+        valid_pct = target_vals.notna().sum() / len(df)
+        if valid_pct < 0.8:
+            raise HTTPException(400, f"Target column '{target_col}' has only {valid_pct*100:.0f}% valid numeric values (need >80%)")
 
         feature_roles = [r for r in model.FEATURE_ROLES if detected.get(r)]
         X = build_feature_matrix(df, detected, feature_roles)
@@ -117,6 +154,7 @@ async def train_model(request: TrainRequest):
         "model": model_name,
         "status": "trained",
         "metrics": metrics,
+        "columns_used": {r: detected.get(r) for r in validation["valid_roles"]},
     }
 
 
@@ -128,7 +166,6 @@ async def train_all_models(dataset_path: str = ""):
 
     results = {}
 
-    # Train each model on its respective sample data
     sample_map = {
         "churn": "sample_churn.csv",
         "marketing": "sample_marketing.csv",

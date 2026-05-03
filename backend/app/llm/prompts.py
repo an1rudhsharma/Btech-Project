@@ -1,5 +1,40 @@
 """Structured Chain-of-Thought prompt templates for grounded LLM responses."""
 
+INTENT_CLASSIFY_PROMPT = """Classify this user query into one of these categories:
+- "business": About pricing, churn, marketing, sales, revenue, customers, sentiment, data analysis, model training, business strategy, or anything that could be answered using business simulation data.
+- "unrelated": About weather, sports, coding help, general knowledge, personal questions, entertainment, or anything clearly unrelated to business analytics.
+
+User query: "{query}"
+
+Respond ONLY with valid JSON: {{"category": "business" or "unrelated"}}"""
+
+COLUMN_CLASSIFY_PROMPT = """You are a data column classifier. Given a column's statistics and sample values, determine what business role it most likely represents.
+
+Column name: "{col_name}"
+Data type: {dtype}
+Min: {min_val}, Max: {max_val}, Mean: {mean_val}
+Unique values: {n_unique} out of {n_rows} rows
+Sample values: {samples}
+
+Possible roles (choose the BEST match, or "unknown" if none fit):
+- price: product/service price (typically 1-10000)
+- marketing_spend: marketing budget (typically 500-100000)
+- usage: customer usage level (typically 0-100)
+- impressions: ad impressions (typically 100-10000000)
+- clicks: ad clicks (typically 10-1000000)
+- churn: binary 0/1 indicating customer left
+- tenure: months as customer (typically 1-120)
+- satisfaction: customer satisfaction score (typically 1-5 or 1-10)
+- num_features: product feature count (typically 1-50)
+- text: free-text reviews/comments (strings)
+- demand: product demand/units sold (typically 10-100000)
+- conversion_rate: conversion ratio (typically 0-1)
+- revenue: total revenue (typically 100-1000000)
+- customer_id: unique identifier (high cardinality)
+- unknown: does not fit any known role
+
+Respond ONLY with valid JSON: {{"role": "<role>", "confidence": <0.0 to 1.0>}}"""
+
 INTENT_PARSE_PROMPT = """You are a business simulation parameter extractor. Parse the user's natural language query into simulation parameters.
 
 User query: "{query}"

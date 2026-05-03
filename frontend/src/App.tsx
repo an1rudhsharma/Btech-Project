@@ -1,9 +1,9 @@
 import { useState, useRef, useEffect } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { Settings, Plus, MessageSquare, Paperclip, Send, Bot, User, X, Trash2, ChevronDown } from 'lucide-react'
+import { Settings, Plus, MessageSquare, Paperclip, Send, Bot, User, Trash2, ChevronDown } from 'lucide-react'
 import { getStatus, trainAll, uploadDataset, chat as chatApi } from './api/client'
 import ReactMarkdown from 'react-markdown'
-import toast, { Toaster } from 'react-hot-toast'
+import toast from 'react-hot-toast'
 
 interface Message {
   role: 'user' | 'assistant'
@@ -15,6 +15,35 @@ interface ChatSession {
   id: string
   title: string
   messages: Message[]
+  hasUploadedData?: boolean
+}
+
+function getSuggestions(models: Record<string, any>, hasData: boolean): string[] {
+  const anyTrained = Object.values(models).some((m: any) => m?.trained)
+
+  if (!hasData && !anyTrained) {
+    return [
+      'Train on sample data',
+      'What can you do?',
+      'What happens if I raise prices by 25%?',
+    ]
+  }
+
+  if (hasData && !anyTrained) {
+    return [
+      'Train all models',
+      'Train churn model',
+      'What can you help me with?',
+    ]
+  }
+
+  return [
+    'What happens if I raise price by 25%?',
+    'How can I reduce customer churn?',
+    'What drives conversion rate?',
+    'What if marketing spend doubles?',
+    'Generate a business report',
+  ]
 }
 
 function App() {
@@ -37,6 +66,7 @@ function App() {
 
   const activeSession = sessions.find(s => s.id === activeSessionId)!
   const models = statusData?.models || {}
+  const suggestions = getSuggestions(models, activeSession.hasUploadedData || false)
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
@@ -65,28 +95,94 @@ function App() {
 
   const handleFileUpload = async (file: File) => {
     const userMsg: Message = { role: 'user', content: `Uploading dataset: **${file.name}**`, file: file.name }
-    updateSession(activeSessionId, { messages: [...activeSession.messages, userMsg] })
+    const currentMessages = [...activeSession.messages, userMsg]
+    updateSession(activeSessionId, { messages: currentMessages })
 
+    setLoading(true)
     try {
       const res = await uploadDataset(file)
       const data = res.data
-      const assistantMsg: Message = {
-        role: 'assistant',
-        content: `Dataset **${data.filename}** uploaded successfully!\n\n- **Rows:** ${data.rows}\n- **Columns:** ${data.columns?.length}\n- **Detected mappings:** ${Object.entries(data.detected_mapping || {}).filter(([, v]) => v).map(([k, v]) => `${k} → ${v}`).join(', ') || 'None'}\n\nYou can now ask me to train models on this data or run simulations. Try:\n- "Train all models"\n- "What would happen if price increases by 30%?"\n- "How can I reduce churn?"`,
+
+      let content = `Dataset **${data.filename}** uploaded and analyzed!\n\n`
+      content += `- **Rows:** ${data.rows}\n`
+      content += `- **Columns:** ${data.columns?.length}\n\n`
+
+      // Show accepted column mappings
+      if (data.accepted_columns?.length > 0) {
+        content += `### Detected Column Mappings\n\n| Column | Role | Method | Confidence |\n|--------|------|--------|------------|\n`
+        data.accepted_columns.forEach((col: any) => {
+          const method = col.method === 'name_match' ? 'Name match' : col.method === 'data_inference' ? 'Data inferred' : 'LLM classified'
+          content += `| ${col.column} | ${col.role} | ${method} | ${(col.confidence * 100).toFixed(0)}% |\n`
+        })
+        content += '\n'
       }
-      updateSession(activeSessionId, { messages: [...activeSession.messages, userMsg, assistantMsg] })
-      if (activeSession.title === 'New Chat') {
-        updateSession(activeSessionId, { title: file.name.replace(/\.[^.]+$/, '') })
+
+      // Show renames
+      if (data.renamed_columns && Object.keys(data.renamed_columns).length > 0) {
+        content += `### Auto-Renamed Columns\n\n`
+        content += `The following columns had wrong names but valid data — they've been automatically renamed:\n\n`
+        Object.entries(data.renamed_columns).forEach(([orig, role]) => {
+          content += `- **${orig}** → \`${role}\`\n`
+        })
+        content += '\n'
       }
+
+      // Show data issues/warnings
+      if (data.data_issues?.length > 0) {
+        content += `### Warnings\n\n`
+        data.data_issues.forEach((issue: any) => {
+          content += `- ${issue.issue}\n`
+        })
+        content += '\n'
+      }
+
+      // Show rejected columns
+      if (data.rejected_columns?.length > 0) {
+        content += `### Rejected Columns\n\n`
+        data.rejected_columns.forEach((rej: any) => {
+          content += `- **${rej.column}**: ${rej.reason}\n`
+        })
+        content += '\n'
+      }
+
+      // Show trainable models
+      if (data.trainable_models?.length > 0) {
+        content += `### Ready to Train\n\nBased on the data, these models can be trained: **${data.trainable_models.join(', ')}**\n\n`
+        content += `Say "train all models" or ask a specific question to get started.`
+      } else {
+        content += `No models could be matched to this data. Try uploading a dataset with columns like price, churn, marketing_spend, or text/reviews.`
+      }
+
+      const assistantMsg: Message = { role: 'assistant', content }
+      updateSession(activeSessionId, {
+        messages: [...currentMessages, assistantMsg],
+        hasUploadedData: true,
+        title: activeSession.title === 'New Chat' ? file.name.replace(/\.[^.]+$/, '') : activeSession.title,
+      })
     } catch (e: any) {
-      const errMsg: Message = { role: 'assistant', content: `Upload failed: ${e.response?.data?.detail || e.message}` }
-      updateSession(activeSessionId, { messages: [...activeSession.messages, userMsg, errMsg] })
+      let errorContent = 'Upload failed: '
+      const detail = e.response?.data?.detail
+      if (typeof detail === 'object' && detail?.issues) {
+        errorContent += `**${detail.error}**\n\n`
+        detail.issues.forEach((issue: any) => {
+          errorContent += `- ${issue.issue || issue}\n`
+        })
+        if (detail.rejected_columns?.length > 0) {
+          errorContent += `\n**Rejected:** ${detail.rejected_columns.map((r: any) => r.column).join(', ')}`
+        }
+      } else {
+        errorContent += (typeof detail === 'string' ? detail : e.message)
+      }
+      const errMsg: Message = { role: 'assistant', content: errorContent }
+      updateSession(activeSessionId, { messages: [...currentMessages, errMsg] })
+    } finally {
+      setLoading(false)
     }
   }
 
-  const handleSend = async () => {
-    if (!input.trim() || loading) return
-    const userText = input.trim()
+  const handleSend = async (overrideText?: string) => {
+    const userText = (overrideText || input).trim()
+    if (!userText || loading) return
     setInput('')
 
     const userMsg: Message = { role: 'user', content: userText }
@@ -97,13 +193,13 @@ function App() {
       updateSession(activeSessionId, { title: userText.slice(0, 40) })
     }
 
-    const trainKeywords = /^(train all|train models|train everything)/i
+    const trainKeywords = /^(train all|train models|train everything|train on sample data)/i
     if (trainKeywords.test(userText)) {
       setLoading(true)
       try {
         await trainAll()
         refetchStatus()
-        const assistantMsg: Message = { role: 'assistant', content: 'All models trained successfully! You can now run simulations and ask business questions.' }
+        const assistantMsg: Message = { role: 'assistant', content: 'All models trained successfully! You can now run simulations and ask business questions.\n\nTry asking:\n- "What happens if I raise prices by 25%?"\n- "How can I reduce churn?"\n- "What drives conversion rate?"' }
         updateSession(activeSessionId, { messages: [...updatedMessages, assistantMsg] })
       } catch (e: any) {
         const errMsg: Message = { role: 'assistant', content: `Training failed: ${e.response?.data?.detail || e.message}` }
@@ -119,19 +215,22 @@ function App() {
       const res = await chatApi(userText)
       const data = res.data
       let content = data.insight || 'No insight generated. Please train models first.'
+
       if (data.predictions?.churn?.churn_probability !== undefined) {
         const p = data.predictions
         content = `### Simulation Results\n\n| Metric | Value |\n|--------|-------|\n| Churn Risk | ${(p.churn.churn_probability * 100).toFixed(1)}% (${p.churn.risk_level}) |\n| Sentiment | ${(p.sentiment?.sentiment_score * 100).toFixed(1)}% (${p.sentiment?.label}) |\n| Conversion | ${(p.marketing?.conversion_rate * 100).toFixed(2)}% |\n| Demand | ${p.pricing?.demand?.toFixed(0) || 'N/A'} |\n\n---\n\n${content}`
       }
-      if (data.counterfactuals?.length > 0) {
+
+      if (data.counterfactuals?.counterfactuals?.length > 0) {
         content += '\n\n### Recommended Changes\n'
-        data.counterfactuals.forEach((cf: any, i: number) => {
+        data.counterfactuals.counterfactuals.forEach((cf: any, i: number) => {
           content += `\n**Option ${i + 1}** (feasibility: ${(cf.feasibility * 100).toFixed(0)}%)\n`
           cf.changes?.forEach((c: any) => {
             content += `- ${c.feature}: ${c.from} → ${c.to} (${c.change_pct > 0 ? '+' : ''}${c.change_pct}%)\n`
           })
         })
       }
+
       const assistantMsg: Message = { role: 'assistant', content }
       updateSession(activeSessionId, { messages: [...updatedMessages, assistantMsg] })
     } catch (e: any) {
@@ -142,6 +241,14 @@ function App() {
       updateSession(activeSessionId, { messages: [...updatedMessages, errMsg] })
     } finally {
       setLoading(false)
+    }
+  }
+
+  const handleSuggestionClick = (suggestion: string) => {
+    if (suggestion.toLowerCase() === 'upload a dataset') {
+      fileInputRef.current?.click()
+    } else {
+      handleSend(suggestion)
     }
   }
 
@@ -232,47 +339,65 @@ function App() {
                   Ask questions about pricing, churn, marketing, or sentiment. Upload data, train models, and get AI-powered business insights — all through conversation.
                 </p>
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 max-w-lg mx-auto">
-                  {[
-                    'What happens if I raise prices by 25%?',
-                    'How can I reduce customer churn?',
-                    'Train all models',
-                    'What drives conversion rate?',
-                  ].map(suggestion => (
+                  {suggestions.map(suggestion => (
                     <button
                       key={suggestion}
-                      onClick={() => { setInput(suggestion) }}
+                      onClick={() => handleSuggestionClick(suggestion)}
                       className="text-left px-4 py-3 bg-white border border-border-subtle rounded-lg text-sm text-text-secondary hover:border-accent/40 hover:text-text-primary transition-all"
                     >
                       {suggestion}
                     </button>
                   ))}
+                  <button
+                    onClick={() => fileInputRef.current?.click()}
+                    className="text-left px-4 py-3 bg-white border border-border-subtle rounded-lg text-sm text-text-secondary hover:border-accent/40 hover:text-text-primary transition-all flex items-center gap-2"
+                  >
+                    <Paperclip size={14} /> Upload a dataset
+                  </button>
                 </div>
               </div>
             )}
 
             {activeSession.messages.map((msg, i) => (
-              <div key={i} className={`flex gap-3 ${msg.role === 'user' ? 'justify-end' : ''}`}>
-                {msg.role === 'assistant' && (
-                  <div className="w-8 h-8 rounded-full bg-accent-dim flex items-center justify-center flex-shrink-0">
-                    <Bot size={16} className="text-accent" />
-                  </div>
-                )}
-                <div className={`max-w-[80%] rounded-2xl px-4 py-3 ${
-                  msg.role === 'user'
-                    ? 'bg-accent text-white'
-                    : 'bg-white border border-border-subtle shadow-sm'
-                }`}>
-                  {msg.role === 'assistant' ? (
-                    <div className="prose prose-sm max-w-none text-text-primary [&_strong]:text-text-primary [&_p]:text-text-secondary [&_li]:text-text-secondary [&_code]:text-accent [&_hr]:border-border-subtle [&_table]:text-xs [&_th]:text-text-muted [&_td]:text-text-primary [&_h3]:text-text-primary [&_h3]:text-sm [&_h3]:mt-4 [&_h3]:mb-2">
-                      <ReactMarkdown>{msg.content}</ReactMarkdown>
+              <div key={i}>
+                <div className={`flex gap-3 ${msg.role === 'user' ? 'justify-end' : ''}`}>
+                  {msg.role === 'assistant' && (
+                    <div className="w-8 h-8 rounded-full bg-accent-dim flex items-center justify-center flex-shrink-0">
+                      <Bot size={16} className="text-accent" />
                     </div>
-                  ) : (
-                    <p className="text-sm whitespace-pre-wrap">{msg.content}</p>
+                  )}
+                  <div className={`max-w-[80%] rounded-2xl px-4 py-3 ${
+                    msg.role === 'user'
+                      ? 'bg-accent text-white'
+                      : 'bg-white border border-border-subtle shadow-sm'
+                  }`}>
+                    {msg.role === 'assistant' ? (
+                      <div className="prose prose-sm max-w-none text-text-primary [&_strong]:text-text-primary [&_p]:text-text-secondary [&_li]:text-text-secondary [&_code]:text-accent [&_hr]:border-border-subtle [&_table]:text-xs [&_th]:text-text-muted [&_td]:text-text-primary [&_h3]:text-text-primary [&_h3]:text-sm [&_h3]:mt-4 [&_h3]:mb-2">
+                        <ReactMarkdown>{msg.content}</ReactMarkdown>
+                      </div>
+                    ) : (
+                      <p className="text-sm whitespace-pre-wrap">{msg.content}</p>
+                    )}
+                  </div>
+                  {msg.role === 'user' && (
+                    <div className="w-8 h-8 rounded-full bg-surface-hover flex items-center justify-center flex-shrink-0 border border-border-subtle">
+                      <User size={16} className="text-text-secondary" />
+                    </div>
                   )}
                 </div>
-                {msg.role === 'user' && (
-                  <div className="w-8 h-8 rounded-full bg-surface-hover flex items-center justify-center flex-shrink-0 border border-border-subtle">
-                    <User size={16} className="text-text-secondary" />
+
+                {/* Suggestion chips after assistant messages */}
+                {msg.role === 'assistant' && i === activeSession.messages.length - 1 && !loading && (
+                  <div className="ml-11 mt-3 flex flex-wrap gap-2">
+                    {suggestions.slice(0, 3).map(s => (
+                      <button
+                        key={s}
+                        onClick={() => handleSuggestionClick(s)}
+                        className="px-3 py-1.5 bg-surface-hover border border-border-subtle rounded-full text-xs text-text-secondary hover:text-text-primary hover:border-accent/30 transition-all"
+                      >
+                        {s}
+                      </button>
+                    ))}
                   </div>
                 )}
               </div>
@@ -303,14 +428,14 @@ function App() {
               <button
                 onClick={() => fileInputRef.current?.click()}
                 className="p-1.5 text-text-muted hover:text-text-primary transition-colors"
-                title="Upload dataset"
+                title="Upload dataset (CSV or Excel)"
               >
                 <Paperclip size={18} />
               </button>
               <input
                 ref={fileInputRef}
                 type="file"
-                accept=".csv,.xlsx"
+                accept=".csv,.xlsx,.xls"
                 className="hidden"
                 onChange={e => { if (e.target.files?.[0]) handleFileUpload(e.target.files[0]); e.target.value = '' }}
               />
@@ -324,7 +449,7 @@ function App() {
                 disabled={loading}
               />
               <button
-                onClick={handleSend}
+                onClick={() => handleSend()}
                 disabled={loading || !input.trim()}
                 className="p-1.5 text-accent hover:text-accent-strong disabled:text-gray-300 disabled:cursor-not-allowed transition-colors"
               >
@@ -332,7 +457,7 @@ function App() {
               </button>
             </div>
             <p className="text-[10px] text-text-muted text-center mt-2">
-              Upload CSV/Excel files or ask about pricing, churn, marketing & sentiment.
+              Upload CSV/Excel files or ask about pricing, churn, marketing & sentiment. Ask anything else too!
             </p>
           </div>
         </div>
