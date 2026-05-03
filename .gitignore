@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+*.pyo
+.env
+trained_models/
+*.joblib
+node_modules/
+dist/
+.vite/
+.DS_Store
