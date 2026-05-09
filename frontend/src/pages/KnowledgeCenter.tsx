@@ -1,13 +1,14 @@
 import { useState, useCallback } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { Upload, FileText, Trash2, ArrowLeft, FileSpreadsheet, File, CheckCircle, AlertCircle, Loader2 } from 'lucide-react'
+import { Upload, FileText, Trash2, ArrowLeft, FileSpreadsheet, File, CheckCircle, AlertCircle, Loader2, Brain, Zap, RotateCcw } from 'lucide-react'
 import { useNavigate } from 'react-router-dom'
-import { knowledgeApi } from '../api/client'
+import { knowledgeApi, getStatus, resetModel } from '../api/client'
 import toast from 'react-hot-toast'
 
 export default function KnowledgeCenter() {
   const [dragActive, setDragActive] = useState(false)
   const [uploading, setUploading] = useState(false)
+  const [trainingResults, setTrainingResults] = useState<any>(null)
   const navigate = useNavigate()
   const queryClient = useQueryClient()
 
@@ -16,11 +17,33 @@ export default function KnowledgeCenter() {
     queryFn: () => knowledgeApi.list().then(r => r.data.documents),
   })
 
+  const { data: statusData } = useQuery({
+    queryKey: ['status'],
+    queryFn: () => getStatus().then(r => r.data),
+    refetchInterval: 30000,
+  })
+
+  const models = statusData?.models || {}
+
+  const handleResetModel = async (modelName: string) => {
+    try {
+      await resetModel(modelName)
+      toast.success(`${modelName} model reset successfully`)
+      queryClient.invalidateQueries({ queryKey: ['status'] })
+    } catch (e: any) {
+      toast.error(`Failed to reset: ${e.response?.data?.detail || e.message}`)
+    }
+  }
+
   const deleteMutation = useMutation({
     mutationFn: (docId: string) => knowledgeApi.delete(docId),
-    onSuccess: () => {
+    onSuccess: (res) => {
       queryClient.invalidateQueries({ queryKey: ['knowledge-docs'] })
-      toast.success('Document deleted')
+      if (res.data?.trained_models?.length > 0) {
+        toast(`Warning: ${res.data.trained_models.join(', ')} model(s) trained on this data are still active. Use Reset to untrain.`, { duration: 5000, icon: '??' })
+      } else {
+        toast.success('Document deleted')
+      }
     },
   })
 
@@ -41,16 +64,21 @@ export default function KnowledgeCenter() {
   const uploadFiles = async (files: File[]) => {
     if (files.length === 0) return
     setUploading(true)
+    setTrainingResults(null)
     let success = 0
     let failed = 0
+    let allTrainingResults: any[] = []
 
     for (const file of files.slice(0, 20)) {
       try {
-        await knowledgeApi.upload(file)
+        const res = await knowledgeApi.upload(file)
         success++
+        if (res.data?.training?.trained?.length > 0) {
+          allTrainingResults.push(...res.data.training.trained)
+        }
       } catch (e: any) {
         failed++
-        toast.error(`Failed: ${file.name} — ${e.response?.data?.detail || e.message}`)
+        toast.error(`Failed: ${file.name} - ${e.response?.data?.detail || e.message}`)
       }
     }
 
@@ -58,6 +86,11 @@ export default function KnowledgeCenter() {
     if (success > 0) {
       toast.success(`${success} file(s) processed successfully`)
       queryClient.invalidateQueries({ queryKey: ['knowledge-docs'] })
+      queryClient.invalidateQueries({ queryKey: ['status'] })
+    }
+    if (allTrainingResults.length > 0) {
+      setTrainingResults(allTrainingResults)
+      toast.success(`Auto-trained ${allTrainingResults.length} ML model(s)!`)
     }
   }
 
@@ -82,11 +115,65 @@ export default function KnowledgeCenter() {
         </button>
         <div>
           <h1 className="text-lg font-semibold text-gray-900">Knowledge Center</h1>
-          <p className="text-xs text-gray-500">Upload documents to give the AI context about your business</p>
+          <p className="text-xs text-gray-500">Upload datasets to auto-train ML models and give AI context about your business</p>
         </div>
       </header>
 
       <div className="flex-1 overflow-auto p-6 max-w-4xl mx-auto w-full">
+        {/* Model Status Banner */}
+        {Object.keys(models).length > 0 && (
+          <div className="mb-6 p-4 bg-white border border-gray-100 rounded-xl">
+            <div className="flex items-center gap-2 mb-3">
+              <Brain size={16} className="text-blue-600" />
+              <span className="text-sm font-medium text-gray-700">ML Model Status</span>
+            </div>
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+              {Object.entries(models).map(([name, info]: [string, any]) => (
+                <div key={name} className={`flex items-center gap-2 px-3 py-2 rounded-lg ${info?.trained ? 'bg-green-50 border border-green-100' : 'bg-gray-50 border border-gray-100'}`}>
+                  <div className={`w-2 h-2 rounded-full ${info?.trained ? 'bg-green-500' : 'bg-gray-300'}`} />
+                  <span className="text-xs font-medium capitalize text-gray-700">{name}</span>
+                  {info?.trained && (
+                    <button
+                      onClick={() => handleResetModel(name)}
+                      className="ml-auto p-1 text-gray-400 hover:text-red-500 transition-colors"
+                      title={`Reset ${name} model`}
+                    >
+                      <RotateCcw size={12} />
+                    </button>
+                  )}
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* Training Results Banner */}
+        {trainingResults && trainingResults.length > 0 && (
+          <div className="mb-6 p-4 bg-green-50 border border-green-200 rounded-xl">
+            <div className="flex items-center gap-2 mb-2">
+              <Zap size={16} className="text-green-600" />
+              <span className="text-sm font-semibold text-green-800">Models Auto-Trained!</span>
+            </div>
+            <div className="space-y-2">
+              {trainingResults.map((r: any, i: number) => (
+                <div key={i} className="flex items-center justify-between text-sm">
+                  <span className="capitalize text-green-700 font-medium">{r.model}</span>
+                  {r.metrics && (
+                    <span className="text-xs text-green-600">
+                      {r.metrics.accuracy ? `Accuracy: ${(r.metrics.accuracy * 100).toFixed(1)}%` :
+                       r.metrics.r2 ? `R2: ${r.metrics.r2.toFixed(3)}` :
+                       'Trained'}
+                    </span>
+                  )}
+                </div>
+              ))}
+            </div>
+            <p className="text-xs text-green-600 mt-2">
+              Go to Chat to start asking questions about your data!
+            </p>
+          </div>
+        )}
+
         {/* Upload Zone */}
         <div
           onDragOver={e => { e.preventDefault(); setDragActive(true) }}
@@ -108,7 +195,7 @@ export default function KnowledgeCenter() {
           {uploading ? (
             <div className="flex flex-col items-center gap-3">
               <Loader2 size={40} className="text-blue-500 animate-spin" />
-              <p className="text-sm text-gray-600">Processing files...</p>
+              <p className="text-sm text-gray-600">Processing files and training models...</p>
             </div>
           ) : (
             <div className="flex flex-col items-center gap-3">
@@ -120,7 +207,10 @@ export default function KnowledgeCenter() {
                   Drop files here or click to browse
                 </p>
                 <p className="text-xs text-gray-400 mt-1">
-                  PDF, DOCX, TXT, CSV, Excel, ZIP — up to 50MB each
+                  PDF, DOCX, TXT, CSV, Excel, ZIP - up to 200MB each
+                </p>
+                <p className="text-xs text-blue-500 mt-1">
+                  CSV/Excel files will auto-train ML models if suitable columns are detected
                 </p>
               </div>
             </div>
@@ -153,9 +243,18 @@ export default function KnowledgeCenter() {
                     <p className="text-sm font-medium text-gray-800 truncate">{doc.filename}</p>
                     <p className="text-xs text-gray-400">
                       {doc.chunk_count} chunks
-                      {doc.file_size_bytes ? ` • ${(doc.file_size_bytes / 1024).toFixed(0)} KB` : ''}
-                      {doc.metadata?.queryable ? ' • Queryable' : ''}
+                      {doc.file_size_bytes ? ` - ${(doc.file_size_bytes / (1024 * 1024)).toFixed(1)} MB` : ''}
+                      {doc.metadata?.queryable ? ' - Queryable' : ''}
                     </p>
+                    {doc.metadata?.trained_models?.length > 0 && (
+                      <div className="flex gap-1 mt-1">
+                        {doc.metadata.trained_models.map((m: string) => (
+                          <span key={m} className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium bg-blue-50 text-blue-700 border border-blue-100">
+                            Trained: {m}
+                          </span>
+                        ))}
+                      </div>
+                    )}
                   </div>
                   <div className="flex items-center gap-2">
                     {getStatusIcon(doc.status)}

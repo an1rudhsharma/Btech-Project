@@ -15,7 +15,7 @@ async def retrieve_context(user_id: str, query: str, top_k: int = 5) -> str:
         return ""
 
     query_embedding = embed_text(query)
-    results = await search_chunks(user_id, query_embedding, top_k=top_k, threshold=0.3)
+    results = await search_chunks(user_id, query_embedding, top_k=top_k, threshold=0.15)
 
     if not results:
         return ""

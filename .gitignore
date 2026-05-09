@@ -13,3 +13,4 @@ dist/
 archive/
 archive.zip
 *.zip
+*.csv

@@ -1,8 +1,8 @@
 import { useState, useRef, useEffect } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { useNavigate } from 'react-router-dom'
-import { Settings, Plus, MessageSquare, Paperclip, Send, Bot, User, Trash2, ChevronDown, X, FileSpreadsheet, BookOpen, LogOut } from 'lucide-react'
-import { getStatus, trainAll, uploadDataset, sessionsApi, streamChat } from '../api/client'
+import { Settings, Plus, MessageSquare, Send, Bot, User, Trash2, ChevronDown, BookOpen, LogOut, Database } from 'lucide-react'
+import { getStatus, trainAll, sessionsApi, streamChat } from '../api/client'
 import { useAuth } from '../contexts/AuthContext'
 import ReactMarkdown from 'react-markdown'
 import toast from 'react-hot-toast'
@@ -17,25 +17,21 @@ interface Message {
 interface ChatSession {
   id: string
   title: string
-  has_uploaded_data?: boolean
   created_at?: string
   updated_at?: string
 }
 
-function getSuggestions(models: Record<string, any>, hasData: boolean): string[] {
+function getSuggestions(models: Record<string, any>): string[] {
   const anyTrained = Object.values(models).some((m: any) => m?.trained)
-  if (!hasData && !anyTrained) {
+  if (!anyTrained) {
     return ['Train on sample data', 'What can you do?', 'What happens if I raise prices by 25%?']
-  }
-  if (hasData && !anyTrained) {
-    return ['Train all models', 'Train churn model', 'What can you help me with?']
   }
   return [
     'What happens if I raise price by 25%?',
     'How can I reduce customer churn?',
     'What drives conversion rate?',
     'What if marketing spend doubles?',
-    'Generate a business report',
+    'Analyze sentiment distribution',
   ]
 }
 
@@ -51,9 +47,7 @@ export default function Chat() {
   const [loading, setLoading] = useState(false)
   const [sidebarOpen, setSidebarOpen] = useState(true)
   const [settingsOpen, setSettingsOpen] = useState(false)
-  const [pendingFiles, setPendingFiles] = useState<File[]>([])
   const messagesEndRef = useRef<HTMLDivElement>(null)
-  const fileInputRef = useRef<HTMLInputElement>(null)
 
   const { data: statusData, refetch: refetchStatus } = useQuery({
     queryKey: ['status'],
@@ -63,9 +57,8 @@ export default function Chat() {
 
   const models = statusData?.models || {}
   const activeSession = sessions.find(s => s.id === activeSessionId)
-  const suggestions = getSuggestions(models, activeSession?.has_uploaded_data || false)
+  const suggestions = getSuggestions(models)
 
-  // Load sessions on mount
   useEffect(() => {
     loadSessions()
   }, [])
@@ -82,9 +75,10 @@ export default function Chat() {
       if (data.length > 0 && !activeSessionId) {
         setActiveSessionId(data[0].id)
         loadMessages(data[0].id)
+      } else if (data.length === 0) {
+        await newChat()
       }
     } catch {
-      // If sessions API fails (Supabase not configured), work in local mode
       const localSession: ChatSession = { id: 'local-1', title: 'New Chat' }
       setSessions([localSession])
       setActiveSessionId('local-1')
@@ -139,69 +133,18 @@ export default function Chat() {
     }
   }
 
-  const handleFilesUpload = async (files: File[]) => {
-    const fileNames = files.map(f => f.name).join(', ')
-    const userMsg: Message = { role: 'user', content: `Uploading ${files.length > 1 ? `${files.length} files` : 'dataset'}: **${fileNames}**` }
-    setMessages(prev => [...prev, userMsg])
-    setLoading(true)
-
-    try {
-      let allContent = ''
-      for (const file of files) {
-        const res = await uploadDataset(file)
-        const data = res.data
-        let content = ''
-        if (data.type === 'zip') {
-          content += `**ZIP: ${data.filename}** — ${data.successful}/${data.total_files} files successful.\n\n`
-          data.results?.forEach((r: any) => {
-            content += r.status === 'success'
-              ? `- **${r.filename}** — ${r.rows} rows, ${r.columns?.length} cols\n`
-              : `- **${r.filename}** — Failed: ${r.error}\n`
-          })
-        } else {
-          content += `**${data.filename}** — ${data.rows} rows, ${data.columns?.length} columns\n\n`
-          if (data.trainable_models?.length > 0) {
-            content += `**Ready to train:** ${data.trainable_models.join(', ')}\n`
-          }
-        }
-        if (files.length > 1) content += '\n---\n\n'
-        allContent += content
-      }
-      allContent += `\nSay "train all models" or ask a specific question to get started.`
-      setMessages(prev => [...prev, { role: 'assistant', content: allContent }])
-      if (activeSessionId) {
-        sessionsApi.update(activeSessionId, { has_uploaded_data: true }).catch(() => {})
-      }
-    } catch (e: any) {
-      const detail = e.response?.data?.detail
-      const errorContent = `Upload failed: ${typeof detail === 'string' ? detail : e.message}`
-      setMessages(prev => [...prev, { role: 'assistant', content: errorContent }])
-    } finally {
-      setLoading(false)
-    }
-  }
-
   const handleSend = async (overrideText?: string) => {
     const userText = (overrideText || input).trim()
-    const filesToUpload = [...pendingFiles]
-    if (!userText && filesToUpload.length === 0) return
+    if (!userText) return
     if (loading) return
 
     setInput('')
-    setPendingFiles([])
-
-    if (filesToUpload.length > 0) {
-      await handleFilesUpload(filesToUpload)
-      if (userText) await processTextMessage(userText)
-      return
-    }
     await processTextMessage(userText)
   }
 
   const processTextMessage = async (userText: string) => {
     setMessages(prev => [...prev, { role: 'user', content: userText }])
 
-    // Update session title
     if (activeSession?.title === 'New Chat' && activeSessionId) {
       const title = userText.slice(0, 50)
       setSessions(prev => prev.map(s => s.id === activeSessionId ? { ...s, title } : s))
@@ -251,7 +194,6 @@ export default function Chat() {
         })
       }
 
-      // Mark streaming as complete
       setMessages(prev => {
         const last = prev[prev.length - 1]
         return [...prev.slice(0, -1), { ...last, streaming: false }]
@@ -270,14 +212,6 @@ export default function Chat() {
       })
     } finally {
       setLoading(false)
-    }
-  }
-
-  const handleSuggestionClick = (suggestion: string) => {
-    if (suggestion.toLowerCase() === 'upload a dataset') {
-      fileInputRef.current?.click()
-    } else {
-      handleSend(suggestion)
     }
   }
 
@@ -321,7 +255,7 @@ export default function Chat() {
             onClick={() => navigate('/knowledge')}
             className="w-full flex items-center gap-2 px-3 py-2 text-sm text-gray-600 hover:text-gray-900 hover:bg-gray-50 rounded-lg transition-all"
           >
-            <BookOpen size={14} /> Knowledge Center
+            <Database size={14} /> Knowledge Center
           </button>
           <button
             onClick={() => setSettingsOpen(!settingsOpen)}
@@ -377,25 +311,26 @@ export default function Chat() {
                   <Bot size={28} className="text-blue-600" />
                 </div>
                 <h2 className="text-xl font-semibold text-gray-900 mb-2">AI Business Simulator</h2>
-                <p className="text-gray-500 text-sm max-w-md mx-auto mb-8">
-                  Upload documents to the Knowledge Center, train ML models, and ask AI-powered business questions.
+                <p className="text-gray-500 text-sm max-w-md mx-auto mb-4">
+                  Ask AI-powered business questions about pricing, churn, marketing & sentiment.
                 </p>
+                <button
+                  onClick={() => navigate('/knowledge')}
+                  className="inline-flex items-center gap-2 px-4 py-2 mb-8 bg-blue-50 border border-blue-100 rounded-lg text-sm text-blue-700 hover:bg-blue-100 transition-all"
+                >
+                  <Database size={16} />
+                  Upload datasets in Knowledge Center to auto-train models
+                </button>
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 max-w-lg mx-auto">
                   {suggestions.map(suggestion => (
                     <button
                       key={suggestion}
-                      onClick={() => handleSuggestionClick(suggestion)}
+                      onClick={() => handleSend(suggestion)}
                       className="text-left px-4 py-3 bg-white border border-gray-200 rounded-lg text-sm text-gray-600 hover:border-blue-300 hover:text-gray-800 transition-all"
                     >
                       {suggestion}
                     </button>
                   ))}
-                  <button
-                    onClick={() => fileInputRef.current?.click()}
-                    className="text-left px-4 py-3 bg-white border border-gray-200 rounded-lg text-sm text-gray-600 hover:border-blue-300 hover:text-gray-800 transition-all flex items-center gap-2"
-                  >
-                    <Paperclip size={14} /> Upload a dataset
-                  </button>
                 </div>
               </div>
             )}
@@ -436,7 +371,7 @@ export default function Chat() {
                     {suggestions.slice(0, 3).map(s => (
                       <button
                         key={s}
-                        onClick={() => handleSuggestionClick(s)}
+                        onClick={() => handleSend(s)}
                         className="px-3 py-1.5 bg-gray-50 border border-gray-200 rounded-full text-xs text-gray-500 hover:text-gray-800 hover:border-blue-300 transition-all"
                       >
                         {s}
@@ -468,66 +403,26 @@ export default function Chat() {
         {/* Input bar */}
         <div className="border-t border-gray-100 bg-white p-4">
           <div className="max-w-3xl mx-auto">
-            {pendingFiles.length > 0 && (
-              <div className="flex flex-wrap gap-2 mb-2">
-                {pendingFiles.map((file, idx) => (
-                  <div key={idx} className="flex items-center gap-1.5 bg-blue-50 border border-blue-100 rounded-lg px-2.5 py-1.5 text-xs text-gray-700">
-                    <FileSpreadsheet size={14} className="text-blue-500" />
-                    <span className="max-w-[150px] truncate">{file.name}</span>
-                    <button
-                      onClick={() => setPendingFiles(prev => prev.filter((_, i) => i !== idx))}
-                      className="ml-0.5 text-gray-400 hover:text-red-500 transition-colors"
-                    >
-                      <X size={12} />
-                    </button>
-                  </div>
-                ))}
-              </div>
-            )}
             <div className="flex items-end gap-2 bg-gray-50 border border-gray-200 rounded-xl px-3 py-2 focus-within:border-blue-300 focus-within:ring-1 focus-within:ring-blue-100 transition-all">
-              <button
-                onClick={() => fileInputRef.current?.click()}
-                className="p-1.5 text-gray-400 hover:text-gray-700 transition-colors"
-                title="Attach files (CSV, Excel, ZIP — up to 20)"
-              >
-                <Paperclip size={18} />
-              </button>
-              <input
-                ref={fileInputRef}
-                type="file"
-                accept=".csv,.xlsx,.xls,.zip,.pdf,.docx,.txt"
-                multiple
-                className="hidden"
-                onChange={e => {
-                  if (e.target.files && e.target.files.length > 0) {
-                    const newFiles = Array.from(e.target.files).slice(0, 20 - pendingFiles.length)
-                    if (e.target.files.length + pendingFiles.length > 20) {
-                      toast.error('Maximum 20 files allowed at once')
-                    }
-                    setPendingFiles(prev => [...prev, ...newFiles].slice(0, 20))
-                  }
-                  e.target.value = ''
-                }}
-              />
               <textarea
                 value={input}
                 onChange={e => setInput(e.target.value)}
                 onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSend() } }}
-                placeholder={pendingFiles.length > 0 ? 'Add a message or press Send to upload...' : 'Ask anything about your business data...'}
+                placeholder="Ask anything about your business data..."
                 className="flex-1 bg-transparent text-sm text-gray-800 placeholder-gray-400 resize-none focus:outline-none min-h-[24px] max-h-[120px] py-1"
                 rows={1}
                 disabled={loading}
               />
               <button
                 onClick={() => handleSend()}
-                disabled={loading || (!input.trim() && pendingFiles.length === 0)}
+                disabled={loading || !input.trim()}
                 className="p-1.5 text-blue-600 hover:text-blue-700 disabled:text-gray-300 disabled:cursor-not-allowed transition-colors"
               >
                 <Send size={18} />
               </button>
             </div>
             <p className="text-[10px] text-gray-400 text-center mt-2">
-              Attach files then Send, or ask about pricing, churn, marketing & sentiment.
+              Upload datasets in the Knowledge Center to auto-train ML models.
             </p>
           </div>
         </div>

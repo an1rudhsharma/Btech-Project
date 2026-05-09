@@ -93,6 +93,8 @@ export const trainModel = (datasetPath: string, modelName: string, targetColumn?
 
 export const trainAll = () => api.post('/train/all')
 
+export const resetModel = (modelName: string) => api.post(`/models/${modelName}/reset`)
+
 export const getCounterfactuals = (modelName: string, scenario: object, totalCfs: number = 4) =>
   api.post('/counterfactual', { model_name: modelName, scenario, total_cfs: totalCfs })
 

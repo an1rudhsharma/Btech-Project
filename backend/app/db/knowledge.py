@@ -29,6 +29,7 @@ async def list_documents(user_id: str) -> list:
         client.table("documents")
         .select("id, filename, file_type, file_size_bytes, chunk_count, status, metadata, uploaded_at")
         .eq("user_id", user_id)
+        .neq("file_type", "ml_summary")
         .order("uploaded_at", desc=True)
         .execute()
     )
@@ -36,9 +37,28 @@ async def list_documents(user_id: str) -> list:
 
 
 async def delete_document(user_id: str, doc_id: str) -> bool:
+    """Delete a document, its chunks, and raw file from disk."""
     client = get_admin_client()
+    # Delete all chunks for this document
+    client.table("document_chunks").delete().eq("document_id", doc_id).eq("user_id", user_id).execute()
+    # Delete the document record
     client.table("documents").delete().eq("id", doc_id).eq("user_id", user_id).execute()
+    # Delete raw file from disk
+    _delete_raw_file(user_id, doc_id)
     return True
+
+
+def _delete_raw_file(user_id: str, doc_id: str):
+    """Remove the saved raw file from disk."""
+    from app.config import settings
+    user_dir = settings.data_dir / "knowledge" / user_id
+    if not user_dir.exists():
+        return
+    for f in user_dir.glob(f"{doc_id}_*"):
+        try:
+            f.unlink()
+        except OSError:
+            pass
 
 
 async def insert_chunks(chunks: list[dict]) -> int:

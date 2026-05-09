@@ -134,10 +134,32 @@ def score_role_fit(profile: dict, role: str) -> float:
 def match_by_name(col_name: str) -> Optional[str]:
     """Try to match column name to a role using pattern matching."""
     col_lower = col_name.lower().strip()
+
+    # Skip columns that look like IDs for non-ID roles
+    is_id = any(col_lower.endswith(s) for s in ("id", "_id", "uuid", "code", "key", "hash")) or col_lower in ("id", "uid")
+
+    # Pass 1: Exact match
     for role, patterns in COLUMN_PATTERNS.items():
+        for pattern in patterns:
+            if col_lower == pattern:
+                return role
+
+    # Pass 2: Substring match with priority ordering
+    # Check more specific roles first (sentiment, churn, etc.) before generic ones (text)
+    priority_order = [
+        "sentiment", "churn", "conversion_rate", "demand", "revenue",
+        "price", "marketing_spend", "impressions", "clicks", "conversions",
+        "customer_id", "tenure", "contract", "satisfaction",
+        "num_features", "usage", "text",
+    ]
+    for role in priority_order:
+        patterns = COLUMN_PATTERNS.get(role, [])
+        if role == "text" and is_id:
+            continue
         for pattern in patterns:
             if pattern in col_lower:
                 return role
+
     return None
 
 
@@ -180,6 +202,12 @@ def analyze_dataframe(df: pd.DataFrame) -> dict:
             expected_dtype = heuristic.get("dtype")
 
             if expected_dtype == "string" and profile.get("inferred_type") == "string":
+                # Verify text columns actually have long content (not IDs)
+                if role == "text":
+                    avg_len = df[col].astype(str).str.len().mean()
+                    if avg_len < 15:
+                        rejected_columns.append({"column": col, "reason": f"Matched 'text' role by name but avg content length is only {avg_len:.0f} chars (looks like IDs)"})
+                        continue
                 column_mapping[role] = col
                 accepted_columns.append({"column": col, "role": role, "method": "name_match", "confidence": 0.95})
                 used_columns.add(col)
@@ -258,6 +286,27 @@ def analyze_dataframe(df: pd.DataFrame) -> dict:
                 "profile": profile,
                 "top_candidates": top_scores,
             })
+
+    # Post-processing: validate text column has the longest actual text content
+    if column_mapping.get("text"):
+        text_col = column_mapping["text"]
+        avg_len = df[text_col].astype(str).str.len().mean()
+        if avg_len < 30:
+            # Find the column with the longest average text
+            best_col = None
+            best_len = avg_len
+            for col in df.columns:
+                if col in used_columns and col != text_col:
+                    continue
+                if df[col].dtype == 'object':
+                    col_avg = df[col].astype(str).str.len().mean()
+                    if col_avg > best_len:
+                        best_len = col_avg
+                        best_col = col
+            if best_col and best_len > avg_len * 2:
+                used_columns.discard(text_col)
+                column_mapping["text"] = best_col
+                used_columns.add(best_col)
 
     return {
         "column_mapping": column_mapping,

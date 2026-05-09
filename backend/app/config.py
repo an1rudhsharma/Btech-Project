@@ -9,7 +9,7 @@ class Settings(BaseSettings):
     model_dir: Path = Path("./trained_models")
     data_dir: Path = Path(os.path.dirname(__file__)) / "data"
     cors_origins: list[str] = ["http://localhost:5173", "http://localhost:3000"]
-    max_upload_size_mb: int = 50
+    max_upload_size_mb: int = 200
     llm_model: str = "llama-3.3-70b-versatile"
 
     # Supabase

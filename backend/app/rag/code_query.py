@@ -3,6 +3,7 @@
 import pandas as pd
 import io
 import traceback
+from pathlib import Path
 from typing import Optional
 
 from app.config import settings
@@ -14,20 +15,61 @@ RULES:
 - The dataframe variable is named `df`
 - Output ONLY the Python code, no explanation
 - The code must assign the result to a variable called `result`
-- Use only pandas and numpy (already imported as pd and np)
+- Use only pandas, numpy, and collections.Counter (already imported as pd, np, Counter)
 - For display, convert result to string if it's not already
 - Handle potential NaN values gracefully
 - Never use file I/O, network calls, or subprocess
+- For value_counts or groupby, show top 10 at most unless asked otherwise
+- Always include actual numbers/counts, not just column names
+- For text analysis questions (common words, themes, drivers), split text into words and find frequencies
+- When analyzing sentiment drivers, compare word frequencies between positive and negative groups
 
 Example output:
 result = df.groupby('month')['revenue'].sum().to_string()
+
+Example for text analysis:
+from collections import Counter
+negative = df[df['sentiment']=='negative']['text'].dropna().str.lower().str.split().explode()
+neg_words = Counter(negative).most_common(20)
+result = 'Top negative words: ' + str(neg_words)
 """
+
+
+def _load_dataset(dataset_info: dict, user_id: str) -> Optional[pd.DataFrame]:
+    """Load the actual dataset file from disk."""
+    doc_id = dataset_info.get("doc_id", "")
+    filename = dataset_info.get("filename", "")
+
+    user_dir = settings.data_dir / "knowledge" / user_id
+    file_path = user_dir / f"{doc_id}_{filename}"
+
+    if not file_path.exists():
+        # Fallback: try to find any file matching the doc_id
+        for f in user_dir.glob(f"{doc_id}_*"):
+            file_path = f
+            break
+
+    if not file_path.exists():
+        return None
+
+    ext = Path(filename).suffix.lower()
+    for encoding in ["utf-8", "latin-1", "cp1252"]:
+        try:
+            if ext in (".xlsx", ".xls"):
+                return pd.read_excel(file_path)
+            else:
+                return pd.read_csv(file_path, encoding=encoding)
+        except (UnicodeDecodeError, pd.errors.ParserError):
+            continue
+
+    return None
 
 
 async def query_structured_data(
     query: str,
     dataset_info: dict,
     llm_client,
+    user_id: str = "",
 ) -> Optional[str]:
     """
     Use LLM to generate pandas code, execute it against the dataset.
@@ -52,7 +94,7 @@ Generate pandas code to answer this. Assign the answer to `result`."""
     if not code:
         return None
 
-    result = _execute_safely(code, dataset_info)
+    result = _execute_safely(code, dataset_info, user_id)
     return result
 
 
@@ -75,9 +117,10 @@ def _clean_code(response: str) -> str:
     return code.strip()
 
 
-def _execute_safely(code: str, dataset_info: dict) -> Optional[str]:
+def _execute_safely(code: str, dataset_info: dict, user_id: str = "") -> Optional[str]:
     """Execute pandas code in a restricted environment."""
     import numpy as np
+    from collections import Counter
 
     forbidden = ["import os", "import sys", "subprocess", "open(", "__import__",
                  "exec(", "eval(", "compile(", "globals(", "locals(",
@@ -87,19 +130,22 @@ def _execute_safely(code: str, dataset_info: dict) -> Optional[str]:
             return f"Code rejected: contains forbidden operation '{f}'"
 
     try:
-        # Reconstruct the dataframe from the stored sample/schema
-        # In production, you'd load the actual stored file
-        df = pd.DataFrame(dataset_info.get("sample_rows", []))
-        if df.empty:
-            return "No data available to query"
+        # Try to load the actual full dataset from disk
+        df = _load_dataset(dataset_info, user_id) if user_id else None
 
-        local_vars = {"df": df, "pd": pd, "np": np}
-        exec(code, {"__builtins__": {}}, local_vars)
+        # Fallback to sample rows if file not found
+        if df is None or df.empty:
+            df = pd.DataFrame(dataset_info.get("sample_rows", []))
+            if df.empty:
+                return "No data available to query"
+
+        local_vars = {"df": df, "pd": pd, "np": np, "Counter": Counter}
+        exec(code, {"__builtins__": {"len": len, "str": str, "int": int, "float": float, "list": list, "dict": dict, "tuple": tuple, "set": set, "range": range, "enumerate": enumerate, "zip": zip, "sorted": sorted, "min": min, "max": max, "sum": sum, "abs": abs, "round": round, "print": print, "isinstance": isinstance, "type": type, "True": True, "False": False, "None": None}}, local_vars)
 
         result = local_vars.get("result")
         if result is None:
             return "Code executed but produced no result"
 
-        return str(result)
+        return str(result)[:3000]
     except Exception as e:
         return f"Query execution error: {str(e)}"

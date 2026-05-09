@@ -20,6 +20,7 @@ class TrainRequest(BaseModel):
     model_name: str
     target_column: Optional[str] = None
     column_mapping: Optional[dict] = None
+    user_id: Optional[str] = None
 
 
 @router.post("/train")
@@ -161,7 +162,7 @@ async def train_model(request: TrainRequest):
                     if i < len(cols):
                         feature_imps[cols[i]] = float(imp)
             await sync_model_to_knowledge_base(
-                user_id="system",
+                user_id=request.user_id or "system",
                 model_name=model_name,
                 metrics=metrics,
                 feature_importances=feature_imps,
@@ -209,3 +210,50 @@ async def train_all_models(dataset_path: str = ""):
             results[model_name] = {"status": "skipped", "message": f"{filename} not found"}
 
     return results
+
+
+@router.post("/models/{model_name}/reset")
+async def reset_model(model_name: str):
+    """Reset a trained model - delete weights and mark as untrained."""
+    if model_name not in simulation_engine.models:
+        raise HTTPException(400, f"Unknown model: {model_name}. Valid: churn, marketing, pricing, sentiment")
+
+    model = simulation_engine.models[model_name]
+
+    # Delete saved weights from disk
+    model_dir = settings.model_dir
+    for pattern in [f"{model_name}*.joblib", f"{model_name}*.pkl"]:
+        import glob
+        for f in glob.glob(str(model_dir / pattern)):
+            try:
+                import os
+                os.remove(f)
+            except OSError:
+                pass
+
+    # Also try the model's own save path
+    if hasattr(model, 'model_path') and model.model_path and model.model_path.exists():
+        try:
+            model.model_path.unlink()
+        except OSError:
+            pass
+
+    # Reset in-memory state
+    model.model = None
+    model.is_trained = False
+    model.training_metrics = {}
+
+    # Delete the ML summary from vector DB
+    if settings.supabase_url:
+        try:
+            from app.db.supabase_client import get_admin_client
+            client = get_admin_client()
+            summary_filename = f"_ml_model_{model_name}_summary.txt"
+            docs = client.table("documents").select("id").eq("filename", summary_filename).execute()
+            for doc in (docs.data or []):
+                client.table("document_chunks").delete().eq("document_id", doc["id"]).execute()
+                client.table("documents").delete().eq("id", doc["id"]).execute()
+        except Exception:
+            pass
+
+    return {"status": "reset", "model": model_name, "trained": False}
