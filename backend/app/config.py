@@ -10,7 +10,13 @@ class Settings(BaseSettings):
     data_dir: Path = Path(os.path.dirname(__file__)) / "data"
     cors_origins: list[str] = ["http://localhost:5173", "http://localhost:3000"]
     max_upload_size_mb: int = 50
-    llm_model: str = "llama-3.1-70b-versatile"
+    llm_model: str = "llama-3.3-70b-versatile"
+
+    # Supabase
+    supabase_url: str = ""
+    supabase_anon_key: str = ""
+    supabase_service_key: str = ""
+    supabase_jwt_secret: str = ""
 
     class Config:
         env_file = ".env"

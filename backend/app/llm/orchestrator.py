@@ -76,70 +76,94 @@ class Orchestrator:
             )
             return {"query": query, "insight": answer, "predictions": None, "category": "unrelated"}
 
-        # Step 1: Parse user intent
-        parse_prompt = INTENT_PARSE_PROMPT.format(query=query)
-        intent = await self.llm.parse_json(parse_prompt)
+        # Catch operational queries (train, upload, status) that slipped through
+        operational_keywords = ["train", "upload", "status", "help", "reset"]
+        query_lower = query.lower().strip()
+        if any(kw in query_lower for kw in operational_keywords) and len(query_lower.split()) <= 5:
+            answer = await self.llm.chat(
+                query,
+                system=(
+                    "You are a business analytics AI assistant. The user seems to be asking about system operations "
+                    "(training models, uploading data, checking status). Tell them to use the appropriate UI action:\n"
+                    "- To train models: type 'train all models' in the chat\n"
+                    "- To upload data: click the paperclip icon to attach files\n"
+                    "- For status: the sidebar shows model training status\n"
+                    "Answer helpfully and suggest a business question they could ask."
+                ),
+            )
+            return {"query": query, "insight": answer, "predictions": None, "category": "operational"}
 
-        if "error" in intent:
-            return {"error": intent["error"], "raw_response": intent.get("raw")}
+        try:
+            # Step 1: Parse user intent
+            parse_prompt = INTENT_PARSE_PROMPT.format(query=query)
+            intent = await self.llm.parse_json(parse_prompt)
 
-        params = intent.get("parameters", {})
-        text = intent.get("text", "Product is good")
-        goal = intent.get("goal", "general_analysis")
+            if "error" in intent:
+                return {"error": intent["error"], "raw_response": intent.get("raw")}
 
-        scenario = {k: v for k, v in params.items() if v is not None}
-        # Fill defaults for missing params
-        defaults = {
-            "price": 100, "marketing_spend": 5000, "num_features": 5,
-            "usage": 50, "impressions": 10000, "clicks": 500,
-        }
-        for k, v in defaults.items():
-            scenario.setdefault(k, v)
+            params = intent.get("parameters", {})
+            text = intent.get("text", "Product is good")
+            goal = intent.get("goal", "general_analysis")
 
-        # Step 2: Run causal simulation
-        if intent.get("comparison_mode"):
-            baseline = {**defaults, **intent.get("baseline_overrides", {})}
-            comparison = simulation_engine.simulate_comparison(baseline, scenario, text)
-            results = comparison["scenario"]
-            baseline_results = comparison["baseline"]
-            deltas = comparison["deltas"]
-        else:
-            results = simulation_engine.simulate(scenario, text)
-            baseline_results = simulation_engine.simulate(defaults, "Product is good")
-            deltas = self._compute_deltas(baseline_results, results)
+            scenario = {k: v for k, v in params.items() if v is not None}
+            defaults = {
+                "price": 100, "marketing_spend": 5000, "num_features": 5,
+                "usage": 50, "impressions": 10000, "clicks": 500,
+            }
+            for k, v in defaults.items():
+                scenario.setdefault(k, v)
 
-        # Step 3: Get SHAP explanations
-        shap_values = simulation_engine.get_shap_for_scenario(scenario)
+            # Step 2: Run causal simulation
+            if intent.get("comparison_mode"):
+                baseline = {**defaults, **intent.get("baseline_overrides", {})}
+                comparison = simulation_engine.simulate_comparison(baseline, scenario, text)
+                results = comparison["scenario"]
+                baseline_results = comparison["baseline"]
+                deltas = comparison["deltas"]
+            else:
+                results = simulation_engine.simulate(scenario, text)
+                baseline_results = simulation_engine.simulate(defaults, "Product is good")
+                deltas = self._compute_deltas(baseline_results, results)
 
-        # Step 4: Generate counterfactuals if relevant
-        counterfactuals = {}
-        if goal in ("reduce_churn", "general_analysis") and counterfactual_engine.is_available("churn"):
-            import pandas as pd
-            query_df = pd.DataFrame([scenario])
-            counterfactuals = counterfactual_engine.generate_counterfactuals(
-                "churn", query_df, total_cfs=3, desired_class="opposite"
+            # Step 3: Get SHAP explanations
+            shap_values = simulation_engine.get_shap_for_scenario(scenario)
+
+            # Step 4: Generate counterfactuals if relevant
+            counterfactuals = {}
+            if goal in ("reduce_churn", "general_analysis") and counterfactual_engine.is_available("churn"):
+                import pandas as pd
+                query_df = pd.DataFrame([scenario])
+                counterfactuals = counterfactual_engine.generate_counterfactuals(
+                    "churn", query_df, total_cfs=3, desired_class="opposite"
+                )
+
+            # Step 5: Generate CoT insight
+            insight = await generate_insight(
+                self.llm,
+                predictions=results,
+                shap_values=shap_values,
+                baseline=baseline_results,
+                current=results,
+                deltas=deltas,
+                counterfactuals=counterfactuals,
+                propagation_trace=results.get("propagation_trace", {}),
             )
 
-        # Step 5: Generate CoT insight
-        insight = await generate_insight(
-            self.llm,
-            predictions=results,
-            shap_values=shap_values,
-            baseline=baseline_results,
-            current=results,
-            deltas=deltas,
-            counterfactuals=counterfactuals,
-            propagation_trace=results.get("propagation_trace", {}),
-        )
-
-        return {
-            "query": query,
-            "parsed_intent": intent,
-            "predictions": results,
-            "insight": insight,
-            "counterfactuals": counterfactuals,
-            "shap_explanations": shap_values,
-        }
+            return {
+                "query": query,
+                "parsed_intent": intent,
+                "predictions": results,
+                "insight": insight,
+                "counterfactuals": counterfactuals,
+                "shap_explanations": shap_values,
+            }
+        except Exception as e:
+            fallback = await self.llm.chat(
+                f"The user asked: '{query}'. Answer this business question helpfully based on general knowledge. "
+                f"Note: the simulation engine encountered an error ({str(e)[:100]}), so provide general advice instead.",
+                system="You are a business analytics AI. Provide helpful business insights.",
+            )
+            return {"query": query, "insight": fallback, "predictions": None, "category": "fallback"}
 
     async def generate_business_report(self, scenarios: list[dict]) -> str:
         """Generate a full report comparing multiple scenarios."""

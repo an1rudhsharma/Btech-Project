@@ -103,19 +103,28 @@ def score_role_fit(profile: dict, role: str) -> float:
         if val_range:
             lo, hi = val_range
             if lo <= col_min and col_max <= hi:
-                score += 0.5
+                score += 0.35
             elif col_min >= lo * 0.5 and col_max <= hi * 2:
-                score += 0.25
+                score += 0.15
 
         if typical_mean:
             lo, hi = typical_mean
             if lo <= col_mean <= hi:
-                score += 0.4
+                score += 0.35
             elif lo * 0.5 <= col_mean <= hi * 2:
-                score += 0.2
+                score += 0.15
 
-        if profile.get("numeric_pct", 0) > 0.8:
+        if profile.get("numeric_pct", 0) > 0.9:
             score += 0.1
+
+        # Penalize if the range is extreme relative to what's expected (reduces false positives)
+        if val_range and typical_mean:
+            expected_range = val_range[1] - val_range[0]
+            actual_range = col_max - col_min
+            if expected_range > 0 and actual_range > 0:
+                range_ratio = actual_range / expected_range
+                if range_ratio < 0.01 or range_ratio > 10:
+                    score *= 0.5
 
         return min(score, 1.0)
 
@@ -204,10 +213,13 @@ def analyze_dataframe(df: pd.DataFrame) -> dict:
                 })
                 rejected_columns.append({"column": col, "reason": f"Right name but wrong data type for role '{role}'"})
 
-    # Pass 2: For unmapped roles, infer from data heuristics
+    # Pass 2: For unmapped roles, infer from data heuristics (conservative threshold)
     all_roles = set(ROLE_HEURISTICS.keys())
     unmapped_roles = all_roles - set(column_mapping.keys())
     unassigned_cols = [c for c in df.columns if c not in used_columns]
+
+    # Only infer roles when data strongly matches — threshold 0.8 prevents false positives
+    INFERENCE_THRESHOLD = 0.8
 
     for role in list(unmapped_roles):
         best_col = None
@@ -219,7 +231,7 @@ def analyze_dataframe(df: pd.DataFrame) -> dict:
                 best_score = score
                 best_col = col
 
-        if best_col and best_score >= 0.6:
+        if best_col and best_score >= INFERENCE_THRESHOLD:
             column_mapping[role] = best_col
             renamed_columns[best_col] = role
             accepted_columns.append({

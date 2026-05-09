@@ -150,6 +150,26 @@ async def train_model(request: TrainRequest):
         except Exception:
             pass
 
+    # Sync model summary to RAG knowledge base (if Supabase is configured)
+    if settings.supabase_url:
+        try:
+            from app.rag.ml_sync import sync_model_to_knowledge_base
+            feature_imps = {}
+            if hasattr(model, "model") and hasattr(model.model, "feature_importances_"):
+                cols = list(X.columns) if model_name != "sentiment" else []
+                for i, imp in enumerate(model.model.feature_importances_):
+                    if i < len(cols):
+                        feature_imps[cols[i]] = float(imp)
+            await sync_model_to_knowledge_base(
+                user_id="system",
+                model_name=model_name,
+                metrics=metrics,
+                feature_importances=feature_imps,
+                dataset_info=f"{request.dataset_path} ({len(df)} rows)",
+            )
+        except Exception:
+            pass
+
     return {
         "model": model_name,
         "status": "trained",

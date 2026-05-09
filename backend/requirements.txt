@@ -16,3 +16,13 @@ pydantic
 pydantic-settings
 aiofiles
 openpyxl
+pytest
+pytest-asyncio
+httpx
+supabase
+python-jose[cryptography]
+sentence-transformers
+langchain-text-splitters
+pypdf2
+python-docx
+sse-starlette

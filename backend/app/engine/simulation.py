@@ -108,7 +108,9 @@ class SimulationEngine:
         features = {role: scenario.get(role, 0) for role in pricing_model.FEATURE_ROLES}
         X = pd.DataFrame([features])
 
-        baseline_price = scenario.get("baseline_price") or scenario.get("price", 100)
+        baseline_price = scenario.get("baseline_price") or scenario.get("price") or 100
+        if baseline_price == 0:
+            baseline_price = 100
         result = pricing_model.predict_with_impact(X, baseline_price)
 
         context["predicted_demand"] = float(result["demand"][0])

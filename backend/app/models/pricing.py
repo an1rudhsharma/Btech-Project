@@ -80,7 +80,7 @@ class PricingModel(BaseModel):
         """Predict demand and compute price impact signal for sentiment."""
         demand = self.predict(X)
         price = X["price"].values if "price" in X.columns else np.array([baseline_price])
-        if baseline_price is None:
+        if baseline_price is None or baseline_price == 0:
             baseline_price = 100.0
         price_change_pct = (price - baseline_price) / baseline_price * 100
         sentiment_impact = -price_change_pct * 0.01  # price up -> sentiment down
@@ -104,7 +104,7 @@ class PricingModel(BaseModel):
         demand_high = self.predict(X_high)[0]
 
         pct_change_demand = (demand_high - demand_low) / demand_low
-        pct_change_price = (2 * delta) / base_price
+        pct_change_price = (2 * delta) / base_price if base_price != 0 else 0.0
         return float(pct_change_demand / pct_change_price) if pct_change_price != 0 else 0.0
 
     def _align_features(self, X: pd.DataFrame) -> pd.DataFrame:
