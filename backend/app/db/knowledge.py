@@ -70,16 +70,40 @@ async def insert_chunks(chunks: list[dict]) -> int:
     return len(chunks)
 
 
-async def search_chunks(user_id: str, query_embedding: list[float], top_k: int = 5, threshold: float = 0.3) -> list:
-    """Vector similarity search using the match_documents RPC function."""
+async def search_chunks(user_id: str, query_embedding: list[float], top_k: int = 8,
+                        threshold: float = 0.3, document_ids: list[str] = None) -> list:
+    """Vector similarity search using the match_documents RPC function.
+    
+    Args:
+        user_id: Scope search to this user's documents
+        query_embedding: The query vector
+        top_k: Maximum number of results
+        threshold: Minimum similarity score
+        document_ids: Optional list of document IDs to restrict search to
+    """
     client = get_admin_client()
-    result = client.rpc("match_documents", {
+    params = {
         "query_embedding": query_embedding,
         "match_user_id": user_id,
         "match_count": top_k,
         "match_threshold": threshold,
-    }).execute()
-    return result.data or []
+    }
+    if document_ids:
+        params["filter_document_ids"] = document_ids
+
+    try:
+        result = client.rpc("match_documents", params).execute()
+        return result.data or []
+    except Exception:
+        # Fallback without document_ids filter if RPC doesn't support it
+        fallback_params = {
+            "query_embedding": query_embedding,
+            "match_user_id": user_id,
+            "match_count": top_k,
+            "match_threshold": threshold,
+        }
+        result = client.rpc("match_documents", fallback_params).execute()
+        return result.data or []
 
 
 async def get_user_has_documents(user_id: str) -> bool:

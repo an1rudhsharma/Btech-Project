@@ -4,18 +4,26 @@ from app.rag.embeddings import embed_text
 from app.db.knowledge import search_chunks, get_user_has_documents
 
 
-async def retrieve_context(user_id: str, query: str, top_k: int = 5) -> str:
+async def retrieve_context(user_id: str, query: str, top_k: int = 8, document_ids: list[str] = None) -> str:
     """
     Retrieve relevant document chunks for a query.
     Returns formatted context string ready for injection into the system prompt.
     Returns empty string if user has no documents.
+    
+    Args:
+        user_id: The user's ID
+        query: Natural language query to search for
+        top_k: Number of top chunks to retrieve
+        document_ids: Optional list of document IDs to scope the search to
     """
     has_docs = await get_user_has_documents(user_id)
     if not has_docs:
         return ""
 
     query_embedding = embed_text(query)
-    results = await search_chunks(user_id, query_embedding, top_k=top_k, threshold=0.15)
+    results = await search_chunks(
+        user_id, query_embedding, top_k=top_k, threshold=0.15, document_ids=document_ids
+    )
 
     if not results:
         return ""

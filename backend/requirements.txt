@@ -21,6 +21,7 @@ pytest-asyncio
 httpx
 supabase
 python-jose[cryptography]
+PyJWT[crypto]
 sentence-transformers
 langchain-text-splitters
 pypdf2

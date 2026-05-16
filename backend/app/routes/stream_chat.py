@@ -1,5 +1,6 @@
 """Streaming chat endpoint - SSE with two-phase message persistence."""
 
+import re
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
@@ -63,13 +64,20 @@ async def _generate_stream(user_id: str, session_id: str, message: str):
         structured_data = await retrieve_structured_data_info(user_id)
         code_result = None
 
-        # Query structured data if datasets exist
+        # Query structured data with smart dataset routing
         if structured_data:
             try:
                 from app.llm.orchestrator import orchestrator
-                code_result = await query_structured_data(
-                    message, structured_data[0], orchestrator.llm, user_id=user_id
-                )
+                ranked_datasets = _rank_datasets(message, structured_data)
+                for dataset in ranked_datasets[:3]:
+                    result = await query_structured_data(
+                        message, dataset, orchestrator.llm, user_id=user_id
+                    )
+                    if result and not _is_unhelpful_result(result):
+                        code_result = result
+                        break
+                if code_result is None and ranked_datasets:
+                    code_result = result
             except Exception:
                 pass
 
@@ -125,6 +133,60 @@ async def _generate_stream(user_id: str, session_id: str, message: str):
         if not full_response:
             await sessions_db.save_message(session_id, "assistant", error_msg)
         yield f"data: {json.dumps({'error': error_msg})}\n\n"
+
+
+def _rank_datasets(query: str, datasets: list[dict]) -> list[dict]:
+    """Rank datasets by relevance to the user's query using keyword matching."""
+    query_lower = query.lower()
+    query_words = set(re.findall(r'[a-z]+', query_lower))
+
+    scored = []
+    for ds in datasets:
+        score = 0
+        filename_lower = ds.get("filename", "").lower()
+        columns_lower = [c.lower() for c in ds.get("columns", [])]
+        all_col_text = " ".join(columns_lower)
+
+        for word in query_words:
+            if word in filename_lower:
+                score += 3
+            for col in columns_lower:
+                if word in col:
+                    score += 2
+                if word == col:
+                    score += 3
+
+        domain_signals = {
+            "churn": ["churn", "retention", "attrition", "customer_left", "left"],
+            "price": ["price", "pricing", "cost", "amount", "revenue", "demand"],
+            "marketing": ["marketing", "campaign", "conversion", "click", "impression", "roi", "engagement"],
+            "sentiment": ["sentiment", "review", "comment", "text", "opinion", "feedback", "polarity"],
+            "sales": ["sales", "revenue", "profit", "order", "quantity", "discount"],
+        }
+
+        for domain, signals in domain_signals.items():
+            if any(s in query_lower for s in signals):
+                if any(s in filename_lower or s in all_col_text for s in signals):
+                    score += 5
+
+        scored.append((score, ds))
+
+    scored.sort(key=lambda x: x[0], reverse=True)
+    return [ds for _, ds in scored]
+
+
+def _is_unhelpful_result(result: str) -> bool:
+    """Check if a code query result is unhelpful/empty."""
+    if not result:
+        return True
+    unhelpful_patterns = [
+        "does not contain", "not possible", "no data available",
+        "not found", "cannot", "doesn't have", "no .* information",
+        "code rejected", "query execution error", "no result",
+        "empty", "no column",
+    ]
+    result_lower = result.lower()
+    return any(re.search(p, result_lower) for p in unhelpful_patterns)
 
 
 def _try_simulation(message: str, sim_engine) -> Optional[str]:
@@ -188,51 +250,52 @@ def _build_system_prompt(rag_context: str, code_result: Optional[str],
                          simulation_result: Optional[str] = None) -> str:
     """Build the system prompt with RAG context and code query results."""
     base = (
-        "You are an AI business analytics assistant. You help users understand their data, "
-        "run simulations, and make data-driven decisions about pricing, churn, marketing, and sentiment."
+        "You are a business analytics assistant. You help users make smarter decisions "
+        "about pricing, customer retention, marketing, and customer sentiment using their own data."
     )
 
-    # Include ML model capabilities
     if model_status:
         trained = [name for name, info in model_status.items() if info.get("trained")]
         if trained:
-            base += f"""
-
-TRAINED ML MODELS AVAILABLE: {', '.join(trained)}
-You can run simulations using these models. When users ask "what if" questions about pricing, churn, marketing, or sentiment, you have real ML predictions to back up your answers."""
+            base += "\n\nYou have trained prediction models ready to answer what-if questions."
 
     if simulation_result:
         base += f"""
 
-SIMULATION RESULT (from trained ML models):
+INTERNAL DATA (use to form your answer, but do NOT expose raw numbers or model names):
 {simulation_result}
 
-Interpret these simulation results for the user. Explain what the numbers mean in business terms."""
+Translate these results into plain business language. State the expected outcome directly."""
 
     if rag_context:
+        # Strip source metadata before injecting
+        cleaned_context = re.sub(r'\[Source:.*?\|.*?\]\n?', '', rag_context).strip()
         base += f"""
 
-RELEVANT CONTEXT FROM USER'S DOCUMENTS:
-{rag_context}
+BACKGROUND INFORMATION FROM USER'S DATA:
+{cleaned_context}
 
-Use the above context to inform your responses. Cite the sources when relevant.
-If the context doesn't contain relevant information for the question, say so and provide general guidance."""
+Use this information to support your answer. Do NOT reference filenames or sources."""
 
     if code_result:
-        base += f"""
+        if not (_is_unhelpful_result(code_result) and simulation_result):
+            base += f"""
 
-DATA QUERY RESULT:
-The following is a computed answer from the user's uploaded dataset:
+COMPUTED ANSWER FROM USER'S DATA:
 {code_result}
 
-Present this result clearly and provide any relevant analysis or interpretation."""
+Present this result clearly in plain language."""
 
     base += """
 
-Guidelines:
-- Be concise and actionable
-- When discussing data, cite specific numbers from the context
-- If you don't have enough information, say so honestly
-- Suggest follow-up questions the user might want to ask"""
+RESPONSE RULES (strictly follow these):
+- Speak in simple business language a CEO would understand.
+- NEVER mention model metrics (r2, accuracy, MAE, RMSE), training data sizes, number of rows/features, or internal file names.
+- NEVER say "the model predicts" or "according to the model". Just state the result as a fact from their data.
+- When referencing data, say "based on your data" — never cite filenames or source tags.
+- Give direct answers with specific numbers (percentages, dollar amounts, counts).
+- Keep answers concise: 2-4 sentences for simple questions, short paragraphs for complex ones.
+- End with 1-2 practical follow-up questions the user might want to ask next.
+- If you don't have enough data to answer, say so briefly and suggest what data would help."""
 
     return base

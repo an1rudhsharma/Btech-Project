@@ -22,7 +22,13 @@ async def auto_train_from_file(file_path: str, user_id: str) -> dict:
 
     try:
         if path.suffix.lower() in (".xlsx", ".xls"):
-            df = pd.read_excel(path)
+            xl = pd.ExcelFile(path)
+            best_df = None
+            for sheet in xl.sheet_names:
+                sheet_df = pd.read_excel(xl, sheet_name=sheet)
+                if best_df is None or len(sheet_df) > len(best_df):
+                    best_df = sheet_df
+            df = best_df if best_df is not None else pd.DataFrame()
         else:
             for enc in ["utf-8", "latin-1", "cp1252"]:
                 try:
@@ -50,19 +56,41 @@ async def auto_train_from_file(file_path: str, user_id: str) -> dict:
         try:
             validation = validate_for_training(df, column_mapping, model_name)
             if not validation["valid"]:
-                skipped.append({"model": model_name, "reason": validation["issues"][0] if validation["issues"] else "Validation failed"})
-                continue
+                # For pricing, allow fallback to price-as-target mode
+                if model_name == "pricing" and column_mapping.get("price"):
+                    pass  # Let _train_single_model handle the fallback
+                else:
+                    skipped.append({"model": model_name, "reason": validation["issues"][0] if validation["issues"] else "Validation failed"})
+                    continue
 
             result = _train_single_model(engine, model_name, df, column_mapping, validation)
             if result:
                 trained.append(result)
+                engine.models[model_name].save()
 
                 # Sync to RAG
                 await _sync_to_rag(user_id, model_name, result, file_path, len(df))
+            elif model_name == "pricing":
+                skipped.append({"model": model_name, "reason": "No suitable target column for pricing"})
         except Exception as e:
             errors.append({"model": model_name, "error": str(e)})
 
     return {"trained": trained, "skipped": skipped, "errors": errors}
+
+
+def _get_numeric_features(df: pd.DataFrame, exclude: list = None) -> pd.DataFrame:
+    """Get all numeric columns as features, excluding specified columns."""
+    exclude = exclude or []
+    numeric_cols = df.select_dtypes(include=['int64', 'float64', 'int32', 'float32']).columns.tolist()
+    feature_cols = [c for c in numeric_cols if c not in exclude]
+    if not feature_cols:
+        return pd.DataFrame()
+    result = df[feature_cols].copy()
+    result = result.fillna(result.median())
+    # Sanitize column names for LightGBM (no special JSON chars)
+    import re
+    result.columns = [re.sub(r'[.\[\]{}:,"\']', '_', c).strip('_') for c in result.columns]
+    return result
 
 
 def _train_single_model(engine, model_name: str, df: pd.DataFrame, column_mapping: dict, validation: dict) -> Optional[dict]:
@@ -75,17 +103,47 @@ def _train_single_model(engine, model_name: str, df: pd.DataFrame, column_mappin
         if not text_col:
             return None
 
-        # Verify the mapped text column actually has long text content
-        # If it looks like IDs (short strings), try to find the real text column
+        # Verify the mapped text column actually has natural language text
         avg_len = df[text_col].astype(str).str.len().mean()
-        if avg_len < 20:
-            # Look for a better text column
+        sample_values = df[text_col].dropna().head(20).astype(str)
+
+        def _is_natural_text(series: pd.Series) -> bool:
+            """Check if a series contains natural language (not URLs, IDs, etc.)."""
+            if series.empty:
+                return False
+            text_sample = " ".join(series.head(10).tolist())
+            url_ratio = sum(1 for v in series if "http" in str(v) or "www." in str(v)) / len(series)
+            if url_ratio > 0.3:
+                return False
+            word_count = text_sample.split()
+            avg_word_len = sum(len(w) for w in word_count) / max(len(word_count), 1)
+            if avg_word_len > 30:
+                return False
+            return True
+
+        if avg_len < 30 or not _is_natural_text(sample_values):
+            # Look for a better text column with real natural language
             candidates = [c for c in df.columns
                           if df[c].dtype == 'object'
-                          and df[c].astype(str).str.len().mean() > 20
-                          and c != label_col]
-            if candidates:
-                text_col = candidates[0]
+                          and c != label_col
+                          and c != text_col]
+            found_text = False
+            for c in candidates:
+                c_avg_len = df[c].astype(str).str.len().mean()
+                c_sample = df[c].dropna().head(20).astype(str)
+                if c_avg_len > 30 and _is_natural_text(c_sample):
+                    text_col = c
+                    avg_len = c_avg_len
+                    found_text = True
+                    break
+            if not found_text:
+                return None
+
+        # Final guard: skip sentiment if no explicit sentiment/label column exists
+        # AND the text column avg length is short (likely product names, not reviews)
+        if not label_col or label_col not in df.columns:
+            if avg_len < 80:
+                return None
 
         X = df[[text_col]]
         y = df[label_col] if label_col and label_col in df.columns else None
@@ -102,7 +160,12 @@ def _train_single_model(engine, model_name: str, df: pd.DataFrame, column_mappin
             return None
 
         feature_roles = [r for r in model.FEATURE_ROLES if column_mapping.get(r)]
-        X = build_feature_matrix(df, column_mapping, feature_roles)
+        if feature_roles:
+            X = build_feature_matrix(df, column_mapping, feature_roles)
+        else:
+            X = _get_numeric_features(df, exclude=[target_col])
+        if X.empty or X.shape[1] == 0:
+            return None
         y = df[target_col]
         metrics = model.train(X, y)
 
@@ -122,7 +185,12 @@ def _train_single_model(engine, model_name: str, df: pd.DataFrame, column_mappin
             return None
 
         feature_roles = [r for r in model.FEATURE_ROLES if column_mapping.get(r)]
-        X = build_feature_matrix(df, column_mapping, feature_roles)
+        if feature_roles:
+            X = build_feature_matrix(df, column_mapping, feature_roles)
+        else:
+            X = _get_numeric_features(df, exclude=[target_col])
+        if X.empty or X.shape[1] == 0:
+            return None
         y = df[target_col]
         metrics = model.train(X, y)
 
@@ -138,12 +206,35 @@ def _train_single_model(engine, model_name: str, df: pd.DataFrame, column_mappin
 
     elif model_name == "pricing":
         target_col = column_mapping.get("demand")
+
+        # Fallback: if no demand column, use one price column as target
+        # and other numeric columns as features (price prediction mode)
+        if not target_col or target_col not in df.columns:
+            price_col = column_mapping.get("price")
+            if price_col and price_col in df.columns:
+                target_col = price_col
+            else:
+                # Try to find any numeric column that looks like a target
+                revenue_col = column_mapping.get("revenue")
+                if revenue_col and revenue_col in df.columns:
+                    target_col = revenue_col
+
         if not target_col or target_col not in df.columns:
             return None
 
-        feature_roles = [r for r in model.FEATURE_ROLES if column_mapping.get(r)]
-        X = build_feature_matrix(df, column_mapping, feature_roles)
-        y = df[target_col]
+        # Ensure target is numeric
+        target_vals = pd.to_numeric(df[target_col], errors="coerce")
+        if target_vals.notna().sum() / len(df) < 0.5:
+            return None
+
+        feature_roles = [r for r in model.FEATURE_ROLES if column_mapping.get(r) and column_mapping.get(r) != target_col]
+        if feature_roles:
+            X = build_feature_matrix(df, column_mapping, feature_roles)
+        else:
+            X = _get_numeric_features(df, exclude=[target_col])
+        if X.empty or X.shape[1] == 0:
+            return None
+        y = target_vals.fillna(target_vals.median())
         metrics = model.train(X, y)
 
         try:

@@ -136,7 +136,7 @@ def match_by_name(col_name: str) -> Optional[str]:
     col_lower = col_name.lower().strip()
 
     # Skip columns that look like IDs for non-ID roles
-    is_id = any(col_lower.endswith(s) for s in ("id", "_id", "uuid", "code", "key", "hash")) or col_lower in ("id", "uid")
+    is_id = any(col_lower.endswith(s) for s in ("id", "_id", "uuid", "code", "key", "hash")) or col_lower in ("id", "uid") or "row id" in col_lower or "order id" in col_lower
 
     # Pass 1: Exact match
     for role, patterns in COLUMN_PATTERNS.items():
@@ -255,6 +255,15 @@ def analyze_dataframe(df: pd.DataFrame) -> dict:
 
         for col in unassigned_cols:
             score = score_role_fit(profiles[col], role)
+
+            # Guard: don't infer "churn" from random binary columns
+            # Require the column name to contain a churn-related word
+            if role == "churn" and score > 0:
+                col_lower = col.lower()
+                churn_signals = ["churn", "left", "attrition", "cancel", "exit", "retain", "drop"]
+                if not any(s in col_lower for s in churn_signals):
+                    score *= 0.3  # Heavy penalty for non-churn-named binary cols
+
             if score > best_score:
                 best_score = score
                 best_col = col

@@ -62,7 +62,7 @@ def extract_text_from_csv(file_bytes: bytes) -> tuple[str, dict]:
         "columns": list(df.columns),
         "dtypes": {col: str(dtype) for col, dtype in df.dtypes.items()},
         "shape": list(df.shape),
-        "sample_rows": df.head(3).to_dict(orient="records"),
+        "sample_rows": df.head(3).fillna("").astype(str).to_dict(orient="records"),
     }
 
     description = f"Dataset with {df.shape[0]} rows and {df.shape[1]} columns.\n"
@@ -74,7 +74,12 @@ def extract_text_from_csv(file_bytes: bytes) -> tuple[str, dict]:
             description += f"- {col} (numeric): min={df[col].min()}, max={df[col].max()}, mean={df[col].mean():.2f}\n"
         else:
             n_unique = df[col].nunique()
-            description += f"- {col} (text/categorical): {n_unique} unique values\n"
+            top_values = df[col].value_counts().head(5).index.tolist()
+            description += f"- {col} (text/categorical): {n_unique} unique values. Examples: {top_values[:3]}\n"
+
+    # For large datasets, keep description concise (Text-to-Pandas will query the full file)
+    if df.shape[0] > 100000:
+        description += f"\nNote: Large dataset ({df.shape[0]:,} rows). Use data queries for detailed analysis.\n"
 
     return description, schema
 
@@ -102,7 +107,13 @@ def parse_file(filename: str, file_bytes: bytes) -> tuple[str, str, dict]:
         metadata["queryable"] = True
     elif ext in (".xlsx", ".xls"):
         import pandas as pd
-        df = pd.read_excel(io.BytesIO(file_bytes))
+        xl = pd.ExcelFile(io.BytesIO(file_bytes))
+        best_df = None
+        for sheet in xl.sheet_names:
+            sheet_df = pd.read_excel(xl, sheet_name=sheet)
+            if best_df is None or len(sheet_df) > len(best_df):
+                best_df = sheet_df
+        df = best_df if best_df is not None else pd.DataFrame()
         buf = io.BytesIO()
         df.to_csv(buf, index=False)
         text, metadata = extract_text_from_csv(buf.getvalue())

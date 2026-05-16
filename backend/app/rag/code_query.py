@@ -56,7 +56,13 @@ def _load_dataset(dataset_info: dict, user_id: str) -> Optional[pd.DataFrame]:
     for encoding in ["utf-8", "latin-1", "cp1252"]:
         try:
             if ext in (".xlsx", ".xls"):
-                return pd.read_excel(file_path)
+                xl = pd.ExcelFile(file_path)
+                best_df = None
+                for sheet in xl.sheet_names:
+                    sheet_df = pd.read_excel(xl, sheet_name=sheet)
+                    if best_df is None or len(sheet_df) > len(best_df):
+                        best_df = sheet_df
+                return best_df if best_df is not None else pd.DataFrame()
             else:
                 return pd.read_csv(file_path, encoding=encoding)
         except (UnicodeDecodeError, pd.errors.ParserError):

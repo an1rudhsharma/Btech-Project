@@ -95,6 +95,11 @@ async def _process_single_file(file_bytes: bytes, filename: str, user_id: str) -
             await kb_db.update_document(doc_id, {"status": "error", "chunk_count": 0})
             raise HTTPException(400, f"No text chunks generated from '{filename}'")
 
+        # Cap chunks at 50 to prevent embedding timeouts on large files
+        MAX_CHUNKS = 50
+        if len(chunks) > MAX_CHUNKS:
+            chunks = chunks[:MAX_CHUNKS]
+
         embeddings = embed_batch(chunks)
 
         chunk_records = [

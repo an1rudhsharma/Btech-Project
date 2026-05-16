@@ -1,29 +1,47 @@
-"""Auth middleware - JWT verification via Supabase."""
+"""Auth middleware - local JWT verification using Supabase JWKS."""
 
+import jwt
+from jwt import PyJWKClient
 from fastapi import Depends, HTTPException
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from typing import Optional
 
-from app.db.supabase_client import get_admin_client
+from app.config import settings
 
 security = HTTPBearer(auto_error=False)
 
+_jwk_client: Optional[PyJWKClient] = None
+
+
+def _get_jwk_client() -> PyJWKClient:
+    global _jwk_client
+    if _jwk_client is None:
+        jwks_url = f"{settings.supabase_url}/auth/v1/.well-known/jwks.json"
+        _jwk_client = PyJWKClient(jwks_url, cache_keys=True)
+    return _jwk_client
+
 
 async def verify_token(token: str) -> dict:
-    """Verify a Supabase access token by calling Supabase auth.getUser."""
+    """Verify a Supabase access token locally using JWKS public keys."""
     try:
-        client = get_admin_client()
-        response = client.auth.get_user(token)
-        if response and response.user:
-            return {
-                "id": response.user.id,
-                "email": response.user.email or "",
-            }
-        raise HTTPException(status_code=401, detail="Invalid token")
-    except HTTPException:
-        raise
-    except Exception as e:
+        jwk_client = _get_jwk_client()
+        signing_key = jwk_client.get_signing_key_from_jwt(token)
+        payload = jwt.decode(
+            token,
+            signing_key.key,
+            algorithms=["ES256", "HS256"],
+            audience="authenticated",
+        )
+        return {
+            "id": payload["sub"],
+            "email": payload.get("email", ""),
+        }
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(status_code=401, detail="Token expired")
+    except jwt.InvalidTokenError as e:
         raise HTTPException(status_code=401, detail=f"Invalid token: {str(e)}")
+    except Exception as e:
+        raise HTTPException(status_code=401, detail=f"Token verification failed: {str(e)}")
 
 
 async def get_current_user(
