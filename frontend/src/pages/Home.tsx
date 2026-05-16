@@ -1,5 +1,4 @@
-import { useEffect } from 'react'
-import { useNavigate, Link } from 'react-router-dom'
+import { Link } from 'react-router-dom'
 import { motion, useScroll, useTransform } from 'framer-motion'
 import { useAuth } from '../contexts/AuthContext'
 import {
@@ -112,16 +111,9 @@ function AnimatedCounter({ value, label, icon: Icon }: { value: string; label: s
 
 export default function Home() {
   const { user, loading } = useAuth()
-  const navigate = useNavigate()
   const { scrollYProgress } = useScroll()
   const heroOpacity = useTransform(scrollYProgress, [0, 0.15], [1, 0])
   const heroScale = useTransform(scrollYProgress, [0, 0.15], [1, 0.95])
-
-  useEffect(() => {
-    if (!loading && user) {
-      navigate('/chat', { replace: true })
-    }
-  }, [user, loading, navigate])
 
   if (loading) {
     return (
@@ -148,18 +140,30 @@ export default function Home() {
             <span className="font-bold text-lg">BizSimAI</span>
           </div>
           <div className="flex items-center gap-3">
-            <Link
-              to="/login"
-              className="px-4 py-2 text-sm font-medium text-gray-300 hover:text-white transition-colors"
-            >
-              Sign In
-            </Link>
-            <Link
-              to="/login?signup=true"
-              className="px-4 py-2 text-sm font-medium bg-blue-600 hover:bg-blue-700 rounded-lg transition-colors"
-            >
-              Get Started
-            </Link>
+            {user ? (
+              <Link
+                to="/chat"
+                className="group px-5 py-2 text-sm font-medium bg-blue-600 hover:bg-blue-700 rounded-lg transition-colors flex items-center gap-2"
+              >
+                Open Chat
+                <ArrowRight size={14} className="group-hover:translate-x-0.5 transition-transform" />
+              </Link>
+            ) : (
+              <>
+                <Link
+                  to="/login"
+                  className="px-4 py-2 text-sm font-medium text-gray-300 hover:text-white transition-colors"
+                >
+                  Sign In
+                </Link>
+                <Link
+                  to="/login?signup=true"
+                  className="px-4 py-2 text-sm font-medium bg-blue-600 hover:bg-blue-700 rounded-lg transition-colors"
+                >
+                  Get Started
+                </Link>
+              </>
+            )}
           </div>
         </div>
       </motion.nav>
@@ -250,19 +254,31 @@ export default function Home() {
             transition={{ duration: 0.7, delay: 0.8 }}
             className="flex flex-col sm:flex-row items-center justify-center gap-4"
           >
-            <Link
-              to="/login?signup=true"
-              className="group px-8 py-3.5 bg-blue-600 hover:bg-blue-700 text-white font-medium rounded-xl transition-all hover:shadow-lg hover:shadow-blue-600/25 flex items-center gap-2"
-            >
-              Get Started Free
-              <ArrowRight size={18} className="group-hover:translate-x-1 transition-transform" />
-            </Link>
-            <Link
-              to="/login"
-              className="px-8 py-3.5 bg-white/5 hover:bg-white/10 border border-white/10 text-white font-medium rounded-xl transition-all"
-            >
-              Sign In
-            </Link>
+            {user ? (
+              <Link
+                to="/chat"
+                className="group px-8 py-3.5 bg-blue-600 hover:bg-blue-700 text-white font-medium rounded-xl transition-all hover:shadow-lg hover:shadow-blue-600/25 flex items-center gap-2"
+              >
+                Go to Chat
+                <ArrowRight size={18} className="group-hover:translate-x-1 transition-transform" />
+              </Link>
+            ) : (
+              <>
+                <Link
+                  to="/login?signup=true"
+                  className="group px-8 py-3.5 bg-blue-600 hover:bg-blue-700 text-white font-medium rounded-xl transition-all hover:shadow-lg hover:shadow-blue-600/25 flex items-center gap-2"
+                >
+                  Get Started Free
+                  <ArrowRight size={18} className="group-hover:translate-x-1 transition-transform" />
+                </Link>
+                <Link
+                  to="/login"
+                  className="px-8 py-3.5 bg-white/5 hover:bg-white/10 border border-white/10 text-white font-medium rounded-xl transition-all"
+                >
+                  Sign In
+                </Link>
+              </>
+            )}
           </motion.div>
         </div>
 
